@@ -52,6 +52,9 @@
 #include <isc/timer.h>
 #include <isc/util.h>
 #include <isc/xml.h>
+#ifdef HAVE_GEOIP
+#include <isc/geoip.h>
+#endif /* HAVE_GEOIP */
 
 #include <isccfg/namedconf.h>
 
@@ -5450,6 +5453,21 @@ view_loaded(void *arg) {
 	return (ISC_R_SUCCESS);
 }
 
+#ifdef HAVE_GEOIP
+static isc_result_t
+load_geoip(ns_server_t *server) {
+	isc_result_t result;
+
+	result = isc_task_beginexclusive(server->task);
+	RUNTIME_CHECK(result == ISC_R_SUCCESS);
+
+	geoip_init();
+
+	isc_task_endexclusive(server->task);
+	return (result);
+}
+#endif /* HAVE_GEOIP */
+
 static isc_result_t
 load_zones(ns_server_t *server) {
 	isc_result_t result;
@@ -5600,6 +5618,11 @@ run_server(isc_task_t *task, isc_event_t *event) {
 	isc_hash_init();
 
 	CHECKFATAL(load_zones(server), "loading zones");
+
+#ifdef HAVE_GEOIP
+	/* Load GeoIP DBs */
+	CHECKFATAL(load_geoip(server), "loading GeoIP");
+#endif /* HAVE_GEOIP */
 }
 
 void
@@ -6046,6 +6069,20 @@ reload(ns_server_t *server) {
 			      NS_LOGMODULE_SERVER, ISC_LOG_ERROR,
 			      "reloading zones failed: %s",
 			      isc_result_totext(result));
+
+#ifdef HAVE_GEOIP
+	/* Reload GeoIP DBs */
+	result = load_geoip(server);
+	if (result == ISC_R_SUCCESS)
+		isc_log_write(ns_g_lctx, NS_LOGCATEGORY_GENERAL,
+			      NS_LOGMODULE_SERVER, ISC_LOG_INFO,
+			      "reloading GeoIP succeeded");
+	else
+		isc_log_write(ns_g_lctx, NS_LOGCATEGORY_GENERAL,
+			      NS_LOGMODULE_SERVER, ISC_LOG_ERROR,
+			      "reloading GeoIP failed: %s",
+			      isc_result_totext(result));
+#endif /* HAVE_GEOIP */
 
  cleanup:
 	return (result);

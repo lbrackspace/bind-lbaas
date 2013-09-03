@@ -31,6 +31,11 @@
 #include <dns/fixedname.h>
 #include <dns/log.h>
 
+#ifdef HAVE_GEOIP
+#include <stdlib.h>
+#include <math.h>
+#endif /* HAVE_GEOIP */
+
 #define LOOP_MAGIC ISC_MAGIC('L','O','O','P')
 
 isc_result_t
@@ -249,6 +254,12 @@ count_acl_elements(const cfg_obj_t *caml, const cfg_obj_t *cctx,
 			if (strcasecmp(name, "localhost") == 0 ||
 			    strcasecmp(name, "localnets") == 0) {
 				n++;
+#ifdef HAVE_GEOIP
+			/* country_ for backwards compatibility with geodns */
+			} else if (strncasecmp(name, "country_", 8) == 0 ||
+			           strncasecmp(name, "geoip_", 6) == 0) {
+				n++;
+#endif /* HAVE_GEOIP */
 			} else if (strcasecmp(name, "any") != 0 &&
 				   strcasecmp(name, "none") != 0) {
 				result = get_acl_def(cctx, name, &cacl);
@@ -441,6 +452,336 @@ nested_acl:
 					de->negative = !neg;
 				} else
 					continue;
+#ifdef HAVE_GEOIP
+			} else if (strncasecmp(name, "country_", 8) == 0) {
+				if (strlen(name+8) == 2) {
+					de->geoip_countryDB.subtype = geoip_countryDB_country_code ;
+					strncpy( de->geoip_countryDB.country_code, name+8, 2 );
+				} else {
+					cfg_obj_log(ce, lctx, ISC_LOG_ERROR,
+						"unrecognized GeoIP Country DB ACL: %s", name );
+					result = ISC_R_FAILURE;
+					goto cleanup;
+				}
+				de->type = dns_aclelementtype_geoip_countryDB;
+				de->negative = neg;
+			} /* country_XX (backwards compatibility) */
+			else if (strncasecmp(name, "geoip_countryDB_", 16) == 0) {
+				const char *noff = name+16 ;
+
+				if ((strncasecmp(noff, "country_", 8) == 0) && (strlen(noff+8) == 2)) {
+					de->geoip_countryDB.subtype = geoip_countryDB_country_code ;
+					strncpy( de->geoip_countryDB.country_code, noff+8, 2 );
+				} else if ((strncasecmp(noff, "country3_", 9) == 0) && (strlen(noff+9) == 3)) {
+					de->geoip_countryDB.subtype = geoip_countryDB_country_code3 ;
+					strncpy( de->geoip_countryDB.country_code3, noff+9, 3 );
+				} else if (strncasecmp(noff, "country_name_", 13) == 0) {
+					unsigned int c ;
+
+					de->geoip_countryDB.subtype = geoip_countryDB_country_name ;
+					strncpy( de->geoip_countryDB.country_name, noff+13, 255 );
+					de->geoip_countryDB.country_name[255] = '\0' ;
+					for ( c=0 ; c < strlen(de->geoip_countryDB.country_name) ; c++ )
+						if ( de->geoip_countryDB.country_name[c] == '_' )
+							de->geoip_countryDB.country_name[c] = ' ';
+						else if ( de->geoip_countryDB.country_name[c] == '|' )
+							de->geoip_countryDB.country_name[c] = '/';
+				} else {
+					cfg_obj_log(ce, lctx, ISC_LOG_ERROR,
+						"unrecognized GeoIP Country DB ACL: %s", name );
+					result = ISC_R_FAILURE;
+					goto cleanup;
+				}
+				de->type = dns_aclelementtype_geoip_countryDB;
+				de->negative = neg;
+			} /* geoip_countryDB_ */
+			else if (strncasecmp(name, "geoip_cityDB_", 13) == 0) {
+				const char *noff = name+13 ;
+				int match ;
+				float flowt[4] ;
+				char radius_type[2+1] ;
+
+				if ((strncasecmp(noff, "country_", 8) == 0) && (strlen(noff+8) == 2)) {
+					de->geoip_cityDB.subtype = geoip_cityDB_country_code ;
+					strncpy( de->geoip_cityDB.country_code, noff+8, 2 );
+				} else if ((strncasecmp(noff, "country3_", 9) == 0) && (strlen(noff+9) == 3)) {
+					de->geoip_cityDB.subtype = geoip_cityDB_country_code3 ;
+					strncpy( de->geoip_cityDB.country_code3, noff+9, 3 );
+				} else if ((strncasecmp(noff, "region_", 7) == 0) && (strlen(noff+7) == 2)) {
+					de->geoip_cityDB.subtype = geoip_cityDB_region ;
+					strncpy( de->geoip_cityDB.region, noff+7, 2 );
+				} else if (strncasecmp(noff, "regionname_", 11) == 0) {
+					unsigned int c ;
+
+					de->geoip_cityDB.subtype = geoip_cityDB_region_name ;
+					strncpy( de->geoip_cityDB.region_name, noff+11, 255 );
+					de->geoip_cityDB.region_name[255] = '\0' ;
+					for ( c=0 ; c < strlen(de->geoip_cityDB.region_name) ; c++ )
+						if ( de->geoip_cityDB.region_name[c] == '_' )
+							de->geoip_cityDB.region_name[c] = ' ';
+						else if ( de->geoip_cityDB.region_name[c] == '|' )
+							de->geoip_cityDB.region_name[c] = '/';
+				} else if (strncasecmp(noff, "city_", 5) == 0) {
+					unsigned int c ;
+
+					de->geoip_cityDB.subtype = geoip_cityDB_city ;
+					strncpy( de->geoip_cityDB.city, noff+5, 255 );
+					de->geoip_cityDB.city[255] = '\0' ;
+					for ( c=0 ; c < strlen(de->geoip_cityDB.city) ; c++ )
+						if ( de->geoip_cityDB.city[c] == '_' )
+							de->geoip_cityDB.city[c] = ' ';
+						else if ( de->geoip_cityDB.city[c] == '|' )
+							de->geoip_cityDB.city[c] = '/';
+				} else if ((strncasecmp(noff, "postal_", 7) == 0) && (strlen(noff+7) <= 6)) {
+					de->geoip_cityDB.subtype = geoip_cityDB_postal_code ;
+					strncpy( de->geoip_cityDB.postal_code, noff+7, 6 );
+					de->geoip_cityDB.postal_code[6] = '\0' ;
+				} else if (( match = sscanf(noff, "lat_%f_lat_%f_lon_%f_lon_%f", &flowt[0], &flowt[1], &flowt[2], &flowt[3]) ) == 4 ) {
+					if ( fabsf(flowt[0]) >= 90 || fabsf(flowt[1]) >= 90
+							|| fabsf(flowt[2]) >= 180 || fabsf(flowt[3]) >= 180 ) {
+						cfg_obj_log(ce, lctx, ISC_LOG_ERROR,
+							"GeoIP ACL includes invalid lat,lat,lon,lon: %f,%f,%f,%f", flowt[0], flowt[1], flowt[2], flowt[3] );
+						result = ISC_R_FAILURE;
+						goto cleanup;
+					}
+
+					if ( flowt[0] == flowt[1] || flowt[2] == flowt[3] ) {
+						cfg_obj_log(ce, lctx, ISC_LOG_ERROR,
+							"GeoIP ACL includes invariant lat vs. lat or lon vs. lon: %f,%f %f,%f", flowt[0], flowt[1], flowt[2], flowt[3] );
+						result = ISC_R_FAILURE;
+						goto cleanup;
+					}
+
+					de->geoip_cityDB.subtype = geoip_cityDB_range ;
+					de->geoip_cityDB.lat[0] = flowt[0] ;
+					de->geoip_cityDB.lat[1] = flowt[1] ;
+					de->geoip_cityDB.lon[0] = flowt[2] ;
+					de->geoip_cityDB.lon[1] = flowt[3] ;
+				} else if (( match = sscanf(noff, "lat_%f_lat_%f", &flowt[0], &flowt[1]) ) == 2 ) {
+					if ( flowt[0] == flowt[1] ) {
+						cfg_obj_log(ce, lctx, ISC_LOG_ERROR,
+							"GeoIP ACL includes invariant lat vs. lat: %f,%f", flowt[0], flowt[1] );
+						result = ISC_R_FAILURE;
+						goto cleanup;
+					}
+
+					de->geoip_cityDB.subtype = geoip_cityDB_range ;
+					de->geoip_cityDB.lat[0] = flowt[0] ;
+					de->geoip_cityDB.lat[1] = flowt[1] ;
+					de->geoip_cityDB.lon[0] = 0.0 ;
+					de->geoip_cityDB.lon[1] = 0.0 ;
+				} else if (( match = sscanf(noff, "lon_%f_lon_%f", &flowt[0], &flowt[1]) ) == 2 ) {
+					if ( flowt[0] == flowt[1] ) {
+						cfg_obj_log(ce, lctx, ISC_LOG_ERROR,
+							"GeoIP ACL includes invariant lon vs. lon: %f,%f", flowt[0], flowt[1] );
+						result = ISC_R_FAILURE;
+						goto cleanup;
+					}
+
+					de->geoip_cityDB.subtype = geoip_cityDB_range ;
+					de->geoip_cityDB.lon[0] = flowt[0] ;
+					de->geoip_cityDB.lon[1] = flowt[1] ;
+					de->geoip_cityDB.lat[0] = 0.0 ;
+					de->geoip_cityDB.lat[1] = 0.0 ;
+				} else if (( match = sscanf(noff, "lat_%f_lon_%f_radius_%f%2s", &flowt[0], &flowt[1], &flowt[2], radius_type) ) == 4 ) {
+					float de2ra = acos(-1)/180 ;
+					float factor = fabsf( cos( flowt[0] * de2ra ) );
+
+					if ( fabsf(flowt[0]) >= 90 || fabsf(flowt[1]) >= 180 ) {
+						cfg_obj_log(ce, lctx, ISC_LOG_ERROR,
+							"GeoIP ACL includes invalid lat,lon: %f,%f", flowt[0], flowt[1] );
+						result = ISC_R_FAILURE;
+						goto cleanup;
+					}
+
+					if ( flowt[2] <= 0 ) {
+						cfg_obj_log(ce, lctx, ISC_LOG_ERROR,
+							"GeoIP ACL includes invalid radius value: %f", flowt[2] );
+						result = ISC_R_FAILURE;
+						goto cleanup;
+					}
+
+					if ( strncasecmp( radius_type, "mi", 2 ) == 0 ) {
+						static float earth_radius_mi = 3958.761 ;
+						float mi_de = earth_radius_mi * de2ra ;
+
+						de->geoip_cityDB.radius[0] = ( flowt[2] / mi_de );
+						de->geoip_cityDB.radius[1] = ( flowt[2] / mi_de ) * factor ;
+					}
+					else if ( strncasecmp( radius_type, "km", 2 ) == 0 ) {
+						static float earth_radius_km = 6371.009 ;
+						float km_de = earth_radius_km * de2ra ;
+
+						de->geoip_cityDB.radius[0] = ( flowt[2] / km_de );
+						de->geoip_cityDB.radius[1] = ( flowt[2] / km_de ) * factor ;
+					}
+					else if ( strncasecmp( radius_type, "de", 2 ) == 0 ) {
+						de->geoip_cityDB.radius[0] = flowt[2] ;
+						de->geoip_cityDB.radius[1] = flowt[2] ;
+					}
+					else {
+						cfg_obj_log(ce, lctx, ISC_LOG_ERROR,
+							"unrecognized GeoIP ACL (need mi, km, or de): %s", name );
+						result = ISC_R_FAILURE;
+						goto cleanup;
+					}
+					de->geoip_cityDB.subtype = geoip_cityDB_radius ;
+					de->geoip_cityDB.lat[0] = flowt[0] ;
+					de->geoip_cityDB.lon[0] = flowt[1] ;
+					de->geoip_cityDB.lat[1] = 0.0 ;
+					de->geoip_cityDB.lon[1] = 0.0 ;
+				} else if (strncasecmp(noff, "metro_", 6) == 0) {
+					de->geoip_cityDB.subtype = geoip_cityDB_metro_code ;
+					de->geoip_cityDB.metro_code = atoi( noff+6 );
+				} else if (strncasecmp(noff, "area_", 5) == 0) {
+					de->geoip_cityDB.subtype = geoip_cityDB_area_code ;
+					de->geoip_cityDB.area_code = atoi( noff+5 );
+				} else if ((strncasecmp(noff, "continent_", 10) == 0) && (strlen(noff+10) == 2)) {
+					de->geoip_cityDB.subtype = geoip_cityDB_continent_code ;
+					strncpy( de->geoip_cityDB.continent_code, noff+10, 2 );
+				} else if (strncasecmp(noff, "timezone_", 9) == 0) {
+					unsigned int c ;
+
+					de->geoip_cityDB.subtype = geoip_cityDB_timezone_code ;
+					strncpy( de->geoip_cityDB.timezone_code, noff+9, 255 );
+					de->geoip_cityDB.timezone_code[255] = '\0';
+					for ( c=0 ; c < strlen(de->geoip_cityDB.timezone_code) ; c++ )
+						if ( de->geoip_cityDB.timezone_code[c] == '_' )
+							de->geoip_cityDB.timezone_code[c] = ' ';
+						else if ( de->geoip_cityDB.timezone_code[c] == '|' )
+							de->geoip_cityDB.timezone_code[c] = '/';
+				} else {
+					cfg_obj_log(ce, lctx, ISC_LOG_ERROR,
+						"unrecognized GeoIP City DB ACL: %s", name );
+					result = ISC_R_FAILURE;
+					goto cleanup;
+				}
+				de->type = dns_aclelementtype_geoip_cityDB;
+				de->negative = neg;
+			} /* geoip_cityDB_ */
+			else if (strncasecmp(name, "geoip_regionDB_", 15) == 0) {
+				const char *noff = name+15 ;
+
+				if ((strncasecmp(noff, "country_", 8) == 0) && (strlen(noff+8) == 2)) {
+					de->geoip_regionDB.subtype = geoip_regionDB_country_code ;
+					strncpy( de->geoip_regionDB.country_code, noff+8, 2 );
+				} else if ((strncasecmp(noff, "region_", 7) == 0) && (strlen(noff+7) == 2)) {
+					de->geoip_regionDB.subtype = geoip_regionDB_region ;
+					strncpy( de->geoip_regionDB.region, noff+7, 2 );
+				} else {
+					cfg_obj_log(ce, lctx, ISC_LOG_ERROR,
+						"unrecognized GeoIP Region DB ACL: %s", name );
+					result = ISC_R_FAILURE;
+					goto cleanup;
+				}
+				de->type = dns_aclelementtype_geoip_regionDB;
+				de->negative = neg;
+			} /* geoip_regionDB_ */
+			else if (strncasecmp(name, "geoip_ispDB_", 12) == 0) {
+				const char *noff = name+12 ;
+
+				if (strncasecmp(noff, "name_", 5) == 0) {
+					unsigned int c ;
+
+					de->geoip_ispDB.subtype = geoip_ispDB_name ;
+					strncpy( de->geoip_ispDB.name, noff+5, 50 );
+					de->geoip_ispDB.name[50] = '\0';
+					for ( c=0 ; c < strlen(de->geoip_ispDB.name) ; c++ )
+						if ( de->geoip_ispDB.name[c] == '_' )
+							de->geoip_ispDB.name[c] = ' ';
+				} else {
+					cfg_obj_log(ce, lctx, ISC_LOG_ERROR,
+						"unrecognized GeoIP ISP DB ACL: %s", name );
+					result = ISC_R_FAILURE;
+					goto cleanup;
+				}
+				de->type = dns_aclelementtype_geoip_ispDB;
+				de->negative = neg;
+			} /* geoip_ispDB_ */
+			else if (strncasecmp(name, "geoip_orgDB_", 12) == 0) {
+				const char *noff = name+12 ;
+
+				if (strncasecmp(noff, "name_", 5) == 0) {
+					unsigned int c ;
+
+					de->geoip_orgDB.subtype = geoip_orgDB_name ;
+					strncpy( de->geoip_orgDB.name, noff+5, 50 );
+					de->geoip_orgDB.name[50] = '\0';
+					for ( c=0 ; c < strlen(de->geoip_orgDB.name) ; c++ )
+						if ( de->geoip_orgDB.name[c] == '_' )
+							de->geoip_orgDB.name[c] = ' ';
+						else if ( de->geoip_orgDB.name[c] == '|' )
+							de->geoip_orgDB.name[c] = '/';
+				} else {
+					cfg_obj_log(ce, lctx, ISC_LOG_ERROR,
+						"unrecognized GeoIP Organization DB ACL: %s", name );
+					result = ISC_R_FAILURE;
+					goto cleanup;
+				}
+				de->type = dns_aclelementtype_geoip_orgDB;
+				de->negative = neg;
+			} /* geoip_orgDB_ */
+			else if (strncasecmp(name, "geoip_asDB_", 11) == 0) {
+				const char *noff = name+11 ;
+
+				if (strncasecmp(noff, "org_", 4) == 0) {
+					unsigned int c ;
+
+					de->geoip_asDB.subtype = geoip_asDB_org ;
+					strncpy( de->geoip_asDB.org, noff+4, 50 );
+					de->geoip_asDB.org[50] = '\0';
+					for ( c=0 ; c < strlen(de->geoip_asDB.org) ; c++ )
+						if ( de->geoip_asDB.org[c] == '_' )
+							de->geoip_asDB.org[c] = ' ';
+						else if ( de->geoip_asDB.org[c] == '|' )
+							de->geoip_asDB.org[c] = '/';
+				} else {
+					cfg_obj_log(ce, lctx, ISC_LOG_ERROR,
+						"unrecognized GeoIP AS DB ACL: %s", name );
+					result = ISC_R_FAILURE;
+					goto cleanup;
+				}
+				de->type = dns_aclelementtype_geoip_asDB;
+				de->negative = neg;
+			} /* geoip_asDB_ */
+			else if (strncasecmp(name, "geoip_netspeedDB_", 17) == 0) {
+				const char *noff = name+17 ;
+
+				if (strncasecmp(noff, "id_", 3) == 0) {
+					de->geoip_netspeedDB.subtype = geoip_netspeedDB_id ;
+					de->geoip_netspeedDB.id = atoi( noff+3 );
+				} else {
+					cfg_obj_log(ce, lctx, ISC_LOG_ERROR,
+						"unrecognized GeoIP NetSpeed DB ACL: %s", name );
+					result = ISC_R_FAILURE;
+					goto cleanup;
+				}
+				de->type = dns_aclelementtype_geoip_netspeedDB;
+				de->negative = neg;
+			} /* geoip_netspeedDB_ */
+			else if (strncasecmp(name, "geoip_domainDB_", 15) == 0) {
+				const char *noff = name+15 ;
+
+				if (strncasecmp(noff, "name_", 5) == 0) {
+					unsigned int c ;
+
+					de->geoip_domainDB.subtype = geoip_domainDB_name ;
+					strncpy( de->geoip_domainDB.name, noff+5, 255 );
+					de->geoip_domainDB.name[255] = '\0';
+					for ( c=0 ; c < strlen(de->geoip_domainDB.name) ; c++ )
+						if ( de->geoip_domainDB.name[c] == '_' )
+							de->geoip_domainDB.name[c] = ' ';
+						else if ( de->geoip_domainDB.name[c] == '|' )
+							de->geoip_domainDB.name[c] = '/';
+				} else {
+					cfg_obj_log(ce, lctx, ISC_LOG_ERROR,
+						"unrecognized GeoIP Domain DB ACL: %s", name );
+					result = ISC_R_FAILURE;
+					goto cleanup;
+				}
+				de->type = dns_aclelementtype_geoip_domainDB;
+				de->negative = neg;
+#endif /* HAVE_GEOIP */
 			} else if (strcasecmp(name, "localhost") == 0) {
 				de->type = dns_aclelementtype_localhost;
 				de->negative = neg;

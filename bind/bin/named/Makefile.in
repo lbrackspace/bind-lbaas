@@ -93,6 +93,7 @@ OBJS =		builtin.@O@ client.@O@ config.@O@ control.@O@ \
 		zoneconf.@O@ \
 		lwaddr.@O@ lwresd.@O@ lwdclient.@O@ lwderror.@O@ lwdgabn.@O@ \
 		lwdgnba.@O@ lwdgrbn.@O@ lwdnoop.@O@ lwsearch.@O@ \
+		geoip.@O@ \
 		${DLZDRIVER_OBJS} ${DBDRIVER_OBJS}
 
 UOBJS =		unix/os.@O@ unix/dlz_dlopen_driver.@O@
@@ -107,6 +108,7 @@ SRCS =		builtin.c client.c config.c control.c \
 		zoneconf.c \
 		lwaddr.c lwresd.c lwdclient.c lwderror.c lwdgabn.c \
 		lwdgnba.c lwdgrbn.c lwdnoop.c lwsearch.c \
+		geoip.c \
 		${DLZDRIVER_SRCS} ${DBDRIVER_SRCS}
 
 MANPAGES =	named.8 lwresd.8 named.conf.5

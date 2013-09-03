@@ -29,6 +29,72 @@
 #include <dns/acl.h>
 #include <dns/iptable.h>
 
+#ifdef HAVE_GEOIP
+#include <isc/thread.h>
+#include <math.h>
+#include <netinet/in.h>
+#include <dns/log.h>
+#include <GeoIP.h>
+#include <GeoIPCity.h>
+#include <isc/geoip.h>
+
+GeoIP * ns_g_geoip_countryDB = (GeoIP *)NULL ;
+GeoIP * ns_g_geoip_cityDB = (GeoIP *)NULL ;
+GeoIP * ns_g_geoip_regionDB = (GeoIP *)NULL ;
+GeoIP * ns_g_geoip_ispDB = (GeoIP *)NULL ;
+GeoIP * ns_g_geoip_orgDB = (GeoIP *)NULL ;
+GeoIP * ns_g_geoip_asDB = (GeoIP *)NULL ;
+GeoIP * ns_g_geoip_netspeedDB = (GeoIP *)NULL ;
+GeoIP * ns_g_geoip_domainDB = (GeoIP *)NULL ;
+#ifdef HAVE_GEOIP_V6
+GeoIP * ns_g_geoip_countryDB_v6 = (GeoIP *)NULL ;
+#endif
+
+#ifdef ISC_PLATFORM_USETHREADS
+/* CITY IPNUM v4 */
+static isc_once_t prev_cityDB_ipnum_once = ISC_ONCE_INIT;
+static isc_thread_key_t prev_cityDB_ipnum ;
+static void
+initialize_prev_cityDB_ipnum( void ) {
+	RUNTIME_CHECK(isc_thread_key_create( &prev_cityDB_ipnum, (void *)NULL) == ISC_R_SUCCESS);
+}
+static uint32_t
+get_prev_cityDB_ipnum() {
+	uint32_t *preval = (uint32_t *)isc_thread_key_getspecific( prev_cityDB_ipnum );
+	if ( preval )
+		return *preval ;
+	return 0 ;
+}
+static void
+set_prev_cityDB_ipnum( const uint32_t in_ipnum ) {
+	uint32_t *preval = (uint32_t *)isc_thread_key_getspecific( prev_cityDB_ipnum );
+	if ( preval )
+		free(preval);
+	if (( preval = (uint32_t *)malloc( sizeof(uint32_t) ) ))
+		*preval = in_ipnum ;
+	isc_thread_key_setspecific( prev_cityDB_ipnum, preval );
+}
+/* CITY RECORD */
+static isc_once_t prev_cityDB_record_once = ISC_ONCE_INIT;
+static isc_thread_key_t prev_cityDB_record ;
+static void
+initialize_prev_cityDB_record( void ) {
+	RUNTIME_CHECK(isc_thread_key_create( &prev_cityDB_record, (void *)NULL) == ISC_R_SUCCESS);
+}
+static GeoIPRecord *
+get_prev_cityDB_record() {
+	return (GeoIPRecord *)isc_thread_key_getspecific( prev_cityDB_record );
+}
+static void
+set_prev_cityDB_record( GeoIPRecord *in_record ) {
+	GeoIPRecord *preval = get_prev_cityDB_record();
+	if ( preval )
+		GeoIPRecord_delete( preval );
+	isc_thread_key_setspecific(prev_cityDB_record, in_record);
+}
+#endif /* ISC_PLATFORM_USETHREADS */
+#endif /* HAVE_GEOIP */
+
 /*
  * Create a new ACL, including an IP table and an array with room
  * for 'n' ACL elements.  The elements are uninitialized and the
@@ -378,6 +444,43 @@ dns_aclelement_match(const isc_netaddr_t *reqaddr,
 	dns_acl_t *inner = NULL;
 	int indirectmatch;
 	isc_result_t result;
+#ifdef HAVE_GEOIP
+	uint32_t ipnum = 0;
+#ifdef HAVE_GEOIP_V6
+	const geoipv6_t *ipnum6 = NULL;
+#ifdef DEBUG_GEOIP
+	/* Use longest address type to size the buffer */
+	char ipstr[INET6_ADDRSTRLEN+1] = "";
+#endif
+#else /* HAVE_GEOIP_V6 */
+#ifdef DEBUG_GEOIP
+	char ipstr[INET_ADDRSTRLEN+1] = "";
+#endif
+#endif /* HAVE_GEOIP_V6 */
+
+	switch ( reqaddr->family ) {
+	case AF_INET:
+		ipnum = ntohl(reqaddr->type.in.s_addr);
+#ifdef DEBUG_GEOIP
+		inet_ntop(AF_INET, &reqaddr->type.in, ipstr, INET_ADDRSTRLEN);
+#endif
+		break;
+#ifdef HAVE_GEOIP_V6
+	case AF_INET6:
+		ipnum6 = &reqaddr->type.in6;
+#ifdef DEBUG_GEOIP
+		inet_ntop(AF_INET6, &reqaddr->type.in6, ipstr, INET6_ADDRSTRLEN);
+#endif
+		break;
+#endif
+	}
+	if ( !ipnum )
+		return(ISC_FALSE);
+#ifdef HAVE_GEOIP_V6
+	if ( !ipnum && !ipnum6 )
+		return(ISC_FALSE);
+#endif
+#endif /* HAVE_GEOIP */
 
 	switch (e->type) {
 	case dns_aclelementtype_keyname:
@@ -393,6 +496,477 @@ dns_aclelement_match(const isc_netaddr_t *reqaddr,
 	case dns_aclelementtype_nestedacl:
 		inner = e->nestedacl;
 		break;
+
+#ifdef HAVE_GEOIP
+	/* GeoIPRecord lookups are only performed if the previous lookup was
+	 * with a different IP address than the current.
+	 *
+	 * This allows only a single GeoIPRecord lookup per query for an entire
+	 * configuration pass, instead of a GeoIPRecord lookup for each and
+	 * every instance of a geoip_* ACL.  Because of this, CityDB /may/ scale
+	 * more nicely than other DBs.
+	 *
+	 * The mechanism consists of simple statics (prev_ipnum, prev_record)
+	 * for non-threaded operation, and an unspeakably painful TLS mechanism
+	 * for threaded operation.
+	 */
+	case dns_aclelementtype_geoip_countryDB: {
+		short int georesult = 0 ;
+		const char *result = (const char *)NULL ;
+
+		if ( ( ipnum && !ns_g_geoip_countryDB )
+#ifdef HAVE_GEOIP_V6
+		     || ( ipnum6 && !ns_g_geoip_countryDB_v6 )
+#endif
+		   )
+			return(ISC_FALSE);
+
+		switch ( e->geoip_countryDB.subtype ) {
+		case geoip_countryDB_country_code:
+			if ( ipnum )
+				result = GeoIP_country_code_by_ipnum( ns_g_geoip_countryDB, ipnum );
+#ifdef HAVE_GEOIP_V6
+			else if ( ipnum6 )
+				result = GeoIP_country_code_by_ipnum_v6( ns_g_geoip_countryDB_v6, *ipnum6 );
+#endif
+			if ( result )
+				georesult = ( strncasecmp( e->geoip_countryDB.country_code, result, 2 ) == 0 );
+#ifdef DEBUG_GEOIP
+			isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+				DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+				"client %s: geoip_countryDB_country_code compared result \"%s\" to rule \"%s\", got %d neg %d",
+				ipstr,
+				result, e->geoip_countryDB.country_code,
+				georesult, e->negative);
+#endif
+			break;
+		case geoip_countryDB_country_code3:
+			if ( ipnum )
+				result = GeoIP_country_code3_by_ipnum( ns_g_geoip_countryDB, ipnum );
+#ifdef HAVE_GEOIP_V6
+			else if ( ipnum6 )
+				result = GeoIP_country_code3_by_ipnum_v6( ns_g_geoip_countryDB_v6, *ipnum6 );
+#endif
+			if ( result )
+				georesult = ( strncasecmp( e->geoip_countryDB.country_code3, result, 3 ) == 0 );
+#ifdef DEBUG_GEOIP
+			isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+				DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+				"client %s: geoip_countryDB_country_code3 compared result \"%s\" to rule \"%s\", got %d neg %d",
+				ipstr,
+				result, e->geoip_countryDB.country_code3,
+				georesult, e->negative);
+#endif
+			break;
+		case geoip_countryDB_country_name:
+			if ( ipnum )
+				result = GeoIP_country_name_by_ipnum( ns_g_geoip_countryDB, ipnum );
+#ifdef HAVE_GEOIP_V6
+			else if ( ipnum6 )
+				result = GeoIP_country_name_by_ipnum_v6( ns_g_geoip_countryDB_v6, *ipnum6 );
+#endif
+			if ( result )
+				georesult = ( strcasecmp( e->geoip_countryDB.country_name, result ) == 0 );
+#ifdef DEBUG_GEOIP
+			isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+				DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+				"client %s: geoip_countryDB_country_name compared result \"%s\" to rule \"%s\", got %d neg %d",
+				ipstr,
+				result, e->geoip_countryDB.country_name,
+				georesult, e->negative);
+#endif
+			break;
+		default:
+			break;
+		} /* switch */
+		return( georesult ? ISC_TRUE : ISC_FALSE );
+	} /* case geoip_countryDB */
+
+	case dns_aclelementtype_geoip_cityDB: {
+		short int georesult = 0 ;
+		const char *scratch = (const char *)NULL;
+		GeoIPRecord *record = (GeoIPRecord *)NULL ;
+#ifdef ISC_PLATFORM_USETHREADS
+		uint32_t prev_cityDB_ipnum = get_prev_cityDB_ipnum();
+
+		GeoIPRecord *prev_cityDB_record = (GeoIPRecord *)NULL ;
+
+		RUNTIME_CHECK(
+			isc_once_do(&prev_cityDB_ipnum_once, initialize_prev_cityDB_ipnum) == ISC_R_SUCCESS
+		);
+		RUNTIME_CHECK(
+			isc_once_do(&prev_cityDB_record_once, initialize_prev_cityDB_record) == ISC_R_SUCCESS
+		);
+
+		prev_cityDB_record = get_prev_cityDB_record();
+#else
+		static uint32_t prev_cityDB_ipnum = 0 ;
+		static void *prev_cityDB_record ;
+#endif
+
+		if ( !ipnum || !ns_g_geoip_cityDB )
+			return( ISC_FALSE );
+
+		if ( prev_cityDB_ipnum == ipnum )
+			record = prev_cityDB_record ;
+		else {
+			record = GeoIP_record_by_ipnum( ns_g_geoip_cityDB, ipnum );
+#ifdef ISC_PLATFORM_USETHREADS
+			set_prev_cityDB_record( record );
+			set_prev_cityDB_ipnum( ipnum );
+#else
+			prev_cityDB_record = record ;
+			prev_cityDB_ipnum = ipnum ;
+#endif
+		}
+			
+		if ( record ) {
+			switch ( e->geoip_cityDB.subtype ) {
+			case geoip_cityDB_country_code:
+				if ( record->country_code )
+					georesult = ( strncasecmp( e->geoip_cityDB.country_code, record->country_code, 2 ) == 0 );
+#ifdef DEBUG_GEOIP
+				isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+					DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+					"client %s: geoip_cityDB_country_code compared result \"%s\" to rule \"%s\", got %d neg %d",
+					ipstr,
+					record->country_code, e->geoip_cityDB.country_code,
+					georesult, e->negative);
+#endif
+				break;
+			case geoip_cityDB_country_code3:
+				if ( record->country_code3 )
+					georesult = ( strncasecmp( e->geoip_cityDB.country_code3, record->country_code3, 3 ) == 0 );
+#ifdef DEBUG_GEOIP
+				isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+					DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+					"client %s: geoip_cityDB_country_code3 compared result \"%s\" to rule \"%s\", got %d neg %d",
+					ipstr,
+					record->country_code3, e->geoip_cityDB.country_code3,
+					georesult, e->negative);
+#endif
+				break;
+			case geoip_cityDB_region:
+				if ( record->region )
+					georesult = ( strncasecmp( e->geoip_cityDB.region, record->region, 2 ) == 0 );
+#ifdef DEBUG_GEOIP
+				isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+					DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+					"client %s: geoip_cityDB_region compared result \"%s\" to rule \"%s\", got %d neg %d",
+					ipstr,
+					record->region, e->geoip_cityDB.region,
+					georesult, e->negative);
+#endif
+				break;
+			case geoip_cityDB_region_name:
+				if ( record->country_code && record->region
+						&& ( scratch = GeoIP_region_name_by_code(record->country_code,record->region) ) )
+					georesult = ( strcasecmp( e->geoip_cityDB.region_name, scratch ) == 0 );
+#ifdef DEBUG_GEOIP
+				isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+					DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+					"client %s: geoip_cityDB_regionname compared result \"%s\" to rule \"%s\", got %d neg %d",
+					ipstr,
+					scratch, e->geoip_cityDB.region_name,
+					georesult, e->negative);
+#endif
+				break;
+			case geoip_cityDB_city:
+				if ( record->city )
+					georesult = ( strcasecmp( e->geoip_cityDB.city, record->city ) == 0 );
+#ifdef DEBUG_GEOIP
+				isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+					DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+					"client %s: geoip_cityDB_city compared result \"%s\" to rule \"%s\", got %d neg %d",
+					ipstr,
+					record->city, e->geoip_cityDB.city,
+					georesult, e->negative);
+#endif
+				break;
+			case geoip_cityDB_postal_code:
+				if ( record->postal_code )
+					georesult = ( strcasecmp( e->geoip_cityDB.postal_code, record->postal_code ) == 0 );
+#ifdef DEBUG_GEOIP
+				isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+					DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+					"client %s: geoip_cityDB_postal compared result \"%s\" to rule \"%s\", got %d neg %d",
+					ipstr,
+					record->postal_code, e->geoip_cityDB.postal_code,
+					georesult, e->negative);
+#endif
+				break;
+			case geoip_cityDB_range: {
+				short int lat = -1 ;
+				short int lon = -1 ;
+				if ( e->geoip_cityDB.lat[0] || e->geoip_cityDB.lat[1] )
+					lat = ( e->geoip_cityDB.lat[0] <= record->latitude && record->latitude <= e->geoip_cityDB.lat[1] );
+				if ( e->geoip_cityDB.lon[0] || e->geoip_cityDB.lon[1] )
+					lon = ( e->geoip_cityDB.lon[0] <= record->longitude && record->longitude <= e->geoip_cityDB.lon[1] );
+				georesult = ( lat && lon );
+#ifdef DEBUG_GEOIP
+				isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+					DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+					"client %s: geoip_cityDB_range compared result %f,%f to rule %f->%f,%f->%f; got %d neg %d",
+					ipstr,
+					record->latitude, record->longitude,
+					e->geoip_cityDB.lat[0], e->geoip_cityDB.lat[1],
+					e->geoip_cityDB.lon[0], e->geoip_cityDB.lon[1],
+					georesult, e->negative);
+#endif
+				break;
+			}
+			case geoip_cityDB_radius:
+				georesult = (( pow((record->latitude-e->geoip_cityDB.lat[0])/e->geoip_cityDB.radius[0],2) + pow((record->longitude-e->geoip_cityDB.lon[0])/e->geoip_cityDB.radius[1],2) ) <= 1 );
+#ifdef DEBUG_GEOIP
+				isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+					DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+					"client %s: geoip_cityDB_radius compared result %f,%f to rule %f->%f %fx%f; got %d neg %d",
+					ipstr,
+					record->latitude, record->longitude,
+					e->geoip_cityDB.lat[0], e->geoip_cityDB.lon[0],
+					e->geoip_cityDB.radius[0], e->geoip_cityDB.radius[1],
+					georesult, e->negative);
+#endif
+				break;
+			case geoip_cityDB_metro_code:
+				georesult = ( e->geoip_cityDB.metro_code == record->metro_code );
+#ifdef DEBUG_GEOIP
+				isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+					DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+					"client %s: geoip_cityDB_metro compared result %d to rule %d, got %d neg %d",
+					ipstr,
+					record->metro_code, e->geoip_cityDB.metro_code,
+					georesult, e->negative);
+#endif
+				break;
+			case geoip_cityDB_area_code:
+				georesult = ( e->geoip_cityDB.area_code == record->area_code );
+#ifdef DEBUG_GEOIP
+				isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+					DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+					"client %s: geoip_cityDB_area compared result %d to rule %d, got %d neg %d",
+					ipstr,
+					record->area_code, e->geoip_cityDB.area_code,
+					georesult, e->negative);
+#endif
+				break;
+			case geoip_cityDB_continent_code:
+				if ( record->continent_code )
+					georesult = ( strncasecmp( e->geoip_cityDB.continent_code, record->continent_code, 2 ) == 0 );
+#ifdef DEBUG_GEOIP
+				isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+					DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+					"client %s: geoip_cityDB_continent compared result \"%s\" to rule \"%s\", got %d neg %d",
+					ipstr,
+					record->continent_code, e->geoip_cityDB.continent_code,
+					georesult, e->negative);
+#endif
+				break;
+			case geoip_cityDB_timezone_code:
+				if ( record->country_code && record->region
+						&& ( scratch = GeoIP_time_zone_by_country_and_region( record->country_code, record->region ) ) )
+					georesult = ( strcasecmp( e->geoip_cityDB.timezone_code, scratch ) == 0 );
+#ifdef DEBUG_GEOIP
+				isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+					DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+					"client %s: geoip_cityDB_timezone compared result \"%s\" to rule \"%s\", got %d neg %d",
+					ipstr,
+					scratch, e->geoip_cityDB.timezone_code,
+					georesult, e->negative);
+#endif
+				break;
+			default:
+				break;
+			} /* switch */
+		} /* if record */
+#ifdef DEBUG_GEOIP
+		else
+			isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+				DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+				"client %s: geoip_cityDB found no record",
+				ipstr);
+#endif
+		return( georesult ? ISC_TRUE : ISC_FALSE );
+	} /* case geoip_cityDB */
+
+	case dns_aclelementtype_geoip_regionDB: {
+		short int georesult = 0 ;
+		const GeoIPRegion *record = (const GeoIPRegion *)NULL ;
+
+		if ( !ipnum || !ns_g_geoip_regionDB )
+			return(ISC_FALSE);
+
+		if (( record = GeoIP_region_by_ipnum( ns_g_geoip_regionDB, ipnum) )) {
+			switch ( e->geoip_regionDB.subtype ) {
+			case geoip_regionDB_country_code:
+				if ( record->country_code )
+					georesult = ( strncasecmp( e->geoip_regionDB.country_code, record->country_code, 3 ) == 0 );
+#ifdef DEBUG_GEOIP
+				isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+					DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+					"client %s: geoip_regionDB_name compared result \"%s\" to rule \"%s\", got %d neg %d",
+					ipstr,
+					record->country_code, e->geoip_regionDB.country_code,
+					georesult, e->negative);
+#endif
+				break;
+			case geoip_regionDB_region:
+				if ( record->region && *record->region )
+					georesult = ( strncasecmp( e->geoip_regionDB.region, record->region, 3 ) == 0 );
+#ifdef DEBUG_GEOIP
+				isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+					DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+					"client %s: geoip_regionDB_name compared result \"%s\" to rule \"%s\", got %d neg %d",
+					ipstr,
+					record->region, e->geoip_regionDB.region,
+					georesult, e->negative);
+#endif
+				break;
+			default:
+				break;
+			} /* switch */
+		} /* if record */
+#ifdef DEBUG_GEOIP
+		else
+			isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+				DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+				"client %s: geoip_regionDB found no record",
+				ipstr);
+#endif
+		return( georesult ? ISC_TRUE : ISC_FALSE );
+	} /* case geoip_regionDB */
+
+	case dns_aclelementtype_geoip_ispDB: {
+		short int georesult = 0 ;
+		const char *result = (const char *)NULL ;
+
+		if ( !ipnum || !ns_g_geoip_ispDB )
+			return(ISC_FALSE);
+
+		switch ( e->geoip_ispDB.subtype ) {
+		case geoip_ispDB_name:
+			if (( result = GeoIP_name_by_ipnum( ns_g_geoip_ispDB, ipnum ) ))
+				georesult = ( strcasecmp( e->geoip_ispDB.name, result ) == 0 );
+#ifdef DEBUG_GEOIP
+			isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+				DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+				"client %s: geoip_ispDB_name compared result \"%s\" to rule \"%s\", got %d neg %d",
+				ipstr,
+				result, e->geoip_ispDB.name,
+				georesult, e->negative);
+#endif
+			break;
+		default:
+			break;
+		} /* switch */
+		return( georesult ? ISC_TRUE : ISC_FALSE );
+	} /* case geoip_ispDB */
+
+	case dns_aclelementtype_geoip_orgDB: {
+		short int georesult = 0 ;
+		const char *result = (const char *)NULL ;
+
+		if ( !ipnum || !ns_g_geoip_orgDB )
+			return(ISC_FALSE);
+
+		switch ( e->geoip_orgDB.subtype ) {
+		case geoip_orgDB_name:
+			if (( result = GeoIP_name_by_ipnum( ns_g_geoip_orgDB, ipnum ) ))
+				georesult = ( strcasecmp( e->geoip_orgDB.name, result ) == 0 );
+#ifdef DEBUG_GEOIP
+			isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+				DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+				"client %s: geoip_orgDB_name compared result \"%s\" to rule \"%s\", got %d neg %d",
+				ipstr,
+				result, e->geoip_orgDB.name,
+				georesult, e->negative);
+#endif
+			break;
+		default:
+			break;
+		} /* switch */
+		return( georesult ? ISC_TRUE : ISC_FALSE );
+	} /* case geoip_orgDB */
+
+	case dns_aclelementtype_geoip_asDB: {
+		short int georesult = 0 ;
+		const char *result = (const char *)NULL ;
+
+		if ( !ipnum || !ns_g_geoip_asDB )
+			return(ISC_FALSE);
+
+		switch ( e->geoip_asDB.subtype ) {
+		case geoip_asDB_org:
+			if (( result = GeoIP_org_by_ipnum( ns_g_geoip_asDB, ipnum ) ))
+				georesult = ( strcasecmp( e->geoip_asDB.org, result ) == 0 );
+#ifdef DEBUG_GEOIP
+			isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+				DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+				"client %s: geoip_asDB_org compared result \"%s\" to rule \"%s\", got %d neg %d",
+				ipstr,
+				result, e->geoip_asDB.org,
+				georesult, e->negative);
+#endif
+			break;
+		default:
+			break;
+		} /* switch */
+		return( georesult ? ISC_TRUE : ISC_FALSE );
+	} /* case geoip_asDB */
+
+	case dns_aclelementtype_geoip_netspeedDB: {
+		short int georesult = 0 ;
+		short int result = -1 ;
+
+		if ( !ipnum || !ns_g_geoip_netspeedDB )
+			return( ISC_FALSE );
+
+		switch ( e->geoip_netspeedDB.subtype ) {
+		case geoip_netspeedDB_id:
+			result = GeoIP_id_by_ipnum( ns_g_geoip_netspeedDB, ipnum );
+			georesult = ( e->geoip_netspeedDB.id == result );
+#ifdef DEBUG_GEOIP
+			isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+				DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+				"client %s: geoip_netspeedDB_id compared result %d to rule %d, got %d neg %d",
+				ipstr,
+				result, e->geoip_netspeedDB.id,
+				georesult, e->negative);
+#endif
+			break;
+		default:
+			break;
+		} /* switch */
+		return( georesult ? ISC_TRUE : ISC_FALSE );
+	} /* case geoip_netspeedDB */
+
+	case dns_aclelementtype_geoip_domainDB: {
+		short int georesult = 0 ;
+		const char *result = (const char *)NULL ;
+
+		if ( !ipnum || !ns_g_geoip_domainDB )
+			return(ISC_FALSE);
+
+		switch ( e->geoip_domainDB.subtype ) {
+		case geoip_domainDB_name:
+			if (( result = GeoIP_name_by_ipnum( ns_g_geoip_domainDB, ipnum ) ))
+				georesult = ( strcasecmp( e->geoip_domainDB.name, result ) == 0 );
+#ifdef DEBUG_GEOIP
+			isc_log_write(dns_lctx, DNS_LOGCATEGORY_NOTIFY,
+				DNS_LOGMODULE_ACL, ISC_LOG_DEBUG(3),
+				"client %s: geoip_domainDB_name compared result \"%s\" to rule \"%s\", got %d neg %d",
+				ipstr,
+				result, e->geoip_domainDB.name,
+				georesult, e->negative);
+#endif
+			break;
+		default:
+			break;
+		} /* switch */
+		return( georesult ? ISC_TRUE : ISC_FALSE );
+	} /* case geoip_domainDB */
+
+#endif /* HAVE_GEOIP */
 
 	case dns_aclelementtype_localhost:
 		if (env == NULL || env->localhost == NULL)

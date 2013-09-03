@@ -984,6 +984,78 @@ case "$use_pkcs11" in
 esac
 AC_SUBST(PKCS11_PROVIDER)
 
+AC_ARG_WITH(geoip,
+[  --with-geoip=PATH       Specify path for GeoIP support],
+    use_geoip="$withval", use_geoip="no")
+
+case "$use_geoip" in
+	no)
+		AC_MSG_CHECKING([for GeoIP support])
+		AC_MSG_RESULT([disabled])
+		;;
+	*)
+		if test "$use_geoip" != "yes"
+		then
+			if test -d "$use_geoip" -o -L "$use_geoip"
+			then
+				CFLAGS="$CFLAGS -I$use_geoip/include"
+				CPPFLAGS="$CPPFLAGS -I$use_geoip/include"
+				LIBS="$LIBS -L$use_geoip/lib -Wl,-rpath=$use_geoip/lib"
+			else
+				AC_MSG_ERROR([GeoIP path $use_geoip does not exist])
+			fi
+		fi
+		AC_CHECK_HEADER(GeoIP.h, [],
+			[AC_MSG_ERROR([GeoIP header file not found])]
+		)
+		AC_SEARCH_LIBS(GeoIP_open, GeoIP, [],
+			[AC_MSG_ERROR([GeoIP library not found])]
+		)
+		AC_SEARCH_LIBS(fabsf, m, [],
+			[AC_MSG_ERROR([Math library not found])]
+		)
+		CFLAGS="${CFLAGS} -DHAVE_GEOIP"
+		AC_MSG_CHECKING([for GeoIP support])
+		AC_MSG_RESULT([yes])
+
+		AC_MSG_CHECKING([for GeoIP IPv6 support])
+		AC_COMPILE_IFELSE(
+			AC_LANG_PROGRAM([[
+				#include <GeoIP.h>
+				#include <netinet/in.h>
+			]], [[
+				struct in6_addr in6;
+	
+				GeoIP_country_name_by_ipnum_v6(NULL, in6);
+			]]),
+			[
+				AC_MSG_RESULT([yes])
+				CFLAGS="${CFLAGS} -DHAVE_GEOIP_V6"
+				CPPFLAGS="${CPPFLAGS} -DHAVE_GEOIP_V6"
+			],
+			[AC_MSG_RESULT([no])]
+		)
+		;;
+esac
+
+AC_MSG_CHECKING(for GeoIP debugging)
+AC_ARG_WITH(geoip-debug,
+[  --with-geoip-debug      Enable GeoIP debugging messages],
+    use_geoip_debug="$withval", use_geoip_debug="no")
+
+case "$use_geoip_debug" in
+	no)
+		AC_MSG_RESULT([disabled])
+		;;
+	yes)
+		AC_MSG_RESULT([yes])
+		CFLAGS="${CFLAGS} -DDEBUG_GEOIP"
+		;;
+	*)
+		AC_MSG_ERROR([--with-geoip-debug requires yes or no])
+		;;
+esac
+
 AC_MSG_CHECKING(for GSSAPI library)
 AC_ARG_WITH(gssapi,
 [  --with-gssapi=PATH      Specify path for system-supplied GSSAPI [[default=yes]]],

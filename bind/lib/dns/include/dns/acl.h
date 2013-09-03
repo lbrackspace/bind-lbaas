@@ -52,8 +52,139 @@ typedef enum {
 	dns_aclelementtype_nestedacl,
 	dns_aclelementtype_localhost,
 	dns_aclelementtype_localnets,
+#ifdef HAVE_GEOIP
+	dns_aclelementtype_geoip_countryDB,
+	dns_aclelementtype_geoip_cityDB,
+	dns_aclelementtype_geoip_regionDB,
+	dns_aclelementtype_geoip_ispDB,
+	dns_aclelementtype_geoip_orgDB,
+	dns_aclelementtype_geoip_asDB,
+	dns_aclelementtype_geoip_netspeedDB,
+	dns_aclelementtype_geoip_domainDB,
+#endif /* HAVE_GEOIP */
 	dns_aclelementtype_any
-} dns_aclelemettype_t;
+} dns_aclelementtype_t;
+
+#ifdef HAVE_GEOIP
+
+/* COUNTRY DB */
+
+typedef enum {
+	geoip_countryDB_country_code,
+	geoip_countryDB_country_code3,
+	geoip_countryDB_country_name,
+} dns_geoip_subtype_countryDB_t ;
+
+typedef struct dns_geoip_countryDB {
+	dns_geoip_subtype_countryDB_t subtype ;
+	char country_code[2] ;
+	char country_code3[3] ;
+	char country_name[256] ;	/* \0 padded */
+} dns_geoip_countryDB_t;
+
+/* CITY DB */
+
+typedef enum {
+	geoip_cityDB_country_code,
+	geoip_cityDB_country_code3,
+	geoip_cityDB_region,
+	geoip_cityDB_region_name,
+	geoip_cityDB_city,
+	geoip_cityDB_postal_code,
+	geoip_cityDB_range,
+	geoip_cityDB_radius,
+	geoip_cityDB_metro_code,
+	geoip_cityDB_area_code,
+	geoip_cityDB_continent_code,
+	geoip_cityDB_timezone_code,
+} dns_geoip_subtype_cityDB_t ;
+
+typedef struct dns_geoip_cityDB {
+	dns_geoip_subtype_cityDB_t subtype ;
+	char country_code[2] ;
+	char country_code3[3] ;
+	char region[2] ;
+	char region_name[256] ;		/* \0 padded */
+	char city[256] ;		/* \0 padded */
+	char postal_code[7] ;		/* \0 padded */
+	float lat[2] ;
+	float lon[2] ;
+	float radius[2] ;
+	int metro_code ;
+	int area_code ;
+	char continent_code[2] ;
+	char timezone_code[256] ;	/* \0 padded */
+} dns_geoip_cityDB_t;
+
+/* REGION DB */
+
+typedef enum {
+	geoip_regionDB_country_code,
+	geoip_regionDB_region,
+} dns_geoip_subtype_regionDB_t ;
+
+typedef struct dns_geoip_regionDB {
+	dns_geoip_subtype_regionDB_t subtype ;
+	char country_code[2] ;
+	char region[2] ;
+} dns_geoip_regionDB_t;
+
+/* ISP DB */
+
+typedef enum {
+	geoip_ispDB_name,
+} dns_geoip_subtype_ispDB_t ;
+
+typedef struct dns_geoip_ispDB {
+	dns_geoip_subtype_ispDB_t subtype ;
+	char name[51] ;			/* \0 padded */
+} dns_geoip_ispDB_t;
+
+/* ORG DB */
+
+typedef enum {
+	geoip_orgDB_name,
+} dns_geoip_subtype_orgDB_t ;
+
+typedef struct dns_geoip_orgDB {
+	dns_geoip_subtype_orgDB_t subtype ;
+	char name[51] ;			/* \0 padded */
+} dns_geoip_orgDB_t;
+
+/* AS DB */
+
+typedef enum {
+	geoip_asDB_org,
+} dns_geoip_subtype_asDB_t ;
+
+typedef struct dns_geoip_asDB {
+	dns_geoip_subtype_asDB_t subtype ;
+	char org[51] ;			/* \0 padded */
+} dns_geoip_asDB_t;
+
+/* NETSPEED DB */
+
+typedef enum {
+	geoip_netspeedDB_id,
+} dns_geoip_subtype_netspeedDB_t ;
+
+typedef struct dns_geoip_netspeedDB {
+	dns_geoip_subtype_netspeedDB_t subtype ;
+	short int id ;
+} dns_geoip_netspeedDB_t;
+
+/* DOMAIN DB */
+
+typedef enum {
+	geoip_domainDB_name,
+} dns_geoip_subtype_domainDB_t ;
+
+typedef struct dns_geoip_domainDB {
+	dns_geoip_subtype_domainDB_t subtype ;
+	char name[256] ;		/* \0 padded */
+} dns_geoip_domainDB_t;
+
+#endif /* HAVE_GEOIP */
 
 typedef struct dns_aclipprefix dns_aclipprefix_t;
 
@@ -63,9 +194,19 @@ struct dns_aclipprefix {
 };
 
 struct dns_aclelement {
-	dns_aclelemettype_t	type;
+	dns_aclelementtype_t	type;
 	isc_boolean_t		negative;
 	dns_name_t		keyname;
+#ifdef HAVE_GEOIP
+	dns_geoip_countryDB_t	geoip_countryDB;
+	dns_geoip_cityDB_t	geoip_cityDB;
+	dns_geoip_regionDB_t	geoip_regionDB;
+	dns_geoip_ispDB_t	geoip_ispDB;
+	dns_geoip_orgDB_t	geoip_orgDB;
+	dns_geoip_asDB_t	geoip_asDB;
+	dns_geoip_netspeedDB_t	geoip_netspeedDB;
+	dns_geoip_domainDB_t	geoip_domainDB;
+#endif /* HAVE_GEOIP */
 	dns_acl_t		*nestedacl;
 	int			node_num;
 };
