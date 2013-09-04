@@ -43,8 +43,8 @@ now run configure
 you may want to change --prefix to some other directory other wise
 "make install" will install the libs and binaries system wide.
 
-./configure --prefix=/usr \
---sysconfdir=/usr/local/etc/bind \
+./configure --prefix=/opt/bind \
+--sysconfdir=/opt/bind/etc/bind \
 --enable-threads \
 --enable-largefile \
 --with-libtool \
