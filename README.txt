@@ -32,7 +32,6 @@ Redhat6.4 or CentOS6.4:
 on Ubuntu 12.04:
     ln -s /usr/lib/x86_64-linux-gnu/libdb-4.8.so /usr/lib
 
-
 Also for CentOS or RedHat be sure to tell the linker to find the MySQL
 lib in /usr/lib64/mysql
 
@@ -58,6 +57,7 @@ you may want to change --prefix to some other directory other wise
 --with-dlz-bdb=yes \
 --with-dlz-mysql=yes \
 --with-dlz-postgres=yes \
+--with-dlz-ldap=yes \
 --with-geoip=/usr \
 --with-geoip-debug
 
