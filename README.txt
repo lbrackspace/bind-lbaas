@@ -44,7 +44,7 @@ you may want to change --prefix to some other directory other wise
 
 ./configure --prefix=/opt/bind \
 --sysconfdir=/opt/bind/etc/bind \
---enable-threads \
+--disable-threads \
 --enable-largefile \
 --with-libtool \
 --enable-shared \

@@ -1,18 +1,16 @@
 view "default_view" {
-    match-clients { 0.0.0.0/0;}
+    match-clients { 0.0.0.0/0;};
+
     dlz "default_zone_view" {
-        database "mysql
-            {host=DB_HOST_GOES_HERE user=USER_GOES_HERE pass=PASSWD_GOES_HERE dbname=DB_NAME_GOES_HERE ssl=false}
-            {select zone from records where zone = '%zone%' and dview='default'}
-            {select ttl, rtype, mx_pri, case when lower(rtype)='txt' then concat('\"', rdata, '\"')
-                else rdata end from records where zone = '%zone%' and rres = '%record%'
-                and not (rtype = 'SOA' or rtype = 'NS') and dview='default'}
-            {select ttl, rtype, mx_pri, rdata, email, serial, refresh, retry, expire, minimum
-                from records where zone = '%zone%' and (rtype = 'SOA' or rtype='NS') and view='default'}
-            {select ttl, rtype, rres, mx_pri, rdata, email, serial, refresh, retry, expire,
-                minimum from records where zone = '%zone%' and not (rtype = 'SOA' or rtype = 'NS')
-                and dview='default'}
-            {select zone from xfr where zone = '%zone%' and client_ip = '%client%'}
-            {update data_count set count = count + 1 where zone ='%zone%'}";
+       database "mysql
+       {host=127.0.0.1 user=USER_HERE pass=PASSWD_HERE dbname=dns ssl=false}
+       {SELECT zone FROM records WHERE zone = '$zone$' and dview='default'}
+       {SELECT ttl, type, mx_priority, IF(type = 'TXT', CONCAT('\"',data,'\"'), data) AS data FROM records WHERE zone = '$zone$' AND host = '$record$' AND type != 'SOA' AND type != 'NS' AND dview='default'}
+       {SELECT ttl, type, data, primary_ns, resp_contact, serial, refresh, retry, expire, minimum FROM records WHERE zone = '$zone$' AND (type = 'SOA' OR type='NS') AND dview='default'}
+       {SELECT ttl, type, host, mx_priority, IF(type = 'TXT', CONCAT('\"',data,'\"'), data) AS data, resp_contact, serial, refresh, retry, expire, minimum FROM records WHERE zone = '$zone$' AND type != 'SOA' AND type != 'NS' AND dview='default'}
+       {SELECT zone FROM xfer where zone='$zone$' AND client_ip = '$client$'}
+       {update data_count set count = count + 1 where zone ='$zone$'}";
     };
+    include "/opt/bind/etc/bind/named.conf.default-zones";
 };
+
